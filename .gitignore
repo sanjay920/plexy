@@ -1,2 +1,16 @@
 .env
 
+__pycache__/
+
+*.ipynb
+
+*.pyc
+
+*.pyo
+
+*.pyd
+
+*.pyz
+
+*.pyw
+
