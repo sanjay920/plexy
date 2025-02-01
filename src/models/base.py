@@ -1,18 +1,20 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Generator, Union
+from typing import List, Dict, Generator
+
 
 class BaseModel(ABC):
-    """Base class for all model providers."""
-    
+    """
+    Base class for all model providers.
+    Must implement stream_chat() yielding either text or tool calls.
+    """
+
     @abstractmethod
     def stream_chat(
         self, messages: List[Dict[str, str]], debug: bool = False
     ) -> Generator[Dict, None, None]:
         """
-        Stream responses from the model. Yields dicts of the form:
-          { "type": "text",       "content": "partial text..." }
-          or
-          { "type": "tool_call",  "name": "web_search", "arguments": "..." }
+        Yields dicts such as:
+          { "type": "text", "content": "..." }
+          { "type": "tool_call", "id": "...", "name": "...", "arguments": "..." }
         """
         pass
-

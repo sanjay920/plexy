@@ -1,112 +1,197 @@
 import json
 import sys
-from typing import Dict, Optional, List, Generator
-from ..models.base import BaseModel
-from ..models.openai import OpenAIModel
-from ..core.logger import log
-from ..core.tool_registry import ToolRegistry
+from typing import Dict, List
+from rich.console import Console
+from rich.markdown import Markdown
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from .logger import log
+from .tool_registry import ToolRegistry
+from .decision import Decision
+
+# import your pipeline helpers
+from tools.pipeline_helpers import (
+    tavily_in_parallel,
+    enrich_docs_with_cache,
+    deduplicate_docs,
+    cohere_rerank,
+    call_decision_llm,
+)
+
+console = Console()
 
 
 class Agent:
     """
-    Agent manages the conversation, calls the model in a streaming fashion,
-    and executes any tool calls that appear in the streamed output.
+    Agent that calls the decision LLM repeatedly.
+    We keep exactly ONE system message in self.conversation[0].
+    After a 'search', we append references to that single system message
+    so the model is forced to produce inline citations if it decides to answer.
     """
 
     def __init__(
         self,
         model_provider: str = "openai",
-        tool_dir: Optional[str] = None,
+        tool_dir: str = "",
         debug: bool = False,
+        max_iters: int = 2,
     ):
-        self.model = self._init_model(model_provider)
         self.tool_registry = ToolRegistry(tool_dir)
         self.conversation: List[Dict] = []
+
         self.debug = debug
+        self.max_iters = max_iters
 
-    def _init_model(self, provider: str) -> BaseModel:
-        if provider == "openai":
-            return OpenAIModel()
-        raise ValueError(f"Unsupported model provider: {provider}")
+        # Start with a single system prompt
+        current_datetime = datetime.now(tz=ZoneInfo("America/Los_Angeles")).strftime(
+            "%Y-%m-%d %H:%M:%S %Z"
+        )
+        self.system_content = (
+            f"You are Plexy, a helpful AI assistant with web_search capability. "
+            f"Current date and time is {current_datetime}.\n\n"
+            "You can either:\n"
+            "1) Provide a final answer => action='answer'\n"
+            "2) Provide web search queries => action='search'\n\n"
+            "If action='search', provide 1-5 queries in 'search_queries'.\n"
+            "Use 'scratchpad' for short reasoning if you want.\n\n"
+            "Return strict JSON for the Decision schema. (No extra keys!)\n"
+            "When you eventually provide a final answer (action='answer'), you MUST:\n"
+            "1) Base your answer ONLY on the references we have added below.\n"
+            "2) Use inline citations like [1], [2], etc.\n"
+            "3) Your response must end with a 'References' section listing the sources cited. For example:\n"
+            "References:\n"
+            "[1] https://example.com/source1\n"
+            "[2] https://example.com/source2\n"
+            "Obviously, dont include any references that are not cited in the body of your response.\n"
+        )
+        # Place it as the single system message
+        self.conversation.append({"role": "system", "content": self.system_content})
 
-    def stream_chat(self, user_input: str) -> Generator[str, None, None]:
+    def run_pipeline(self, user_query: str):
         """
-        Takes a user input, appends it to the conversation, and yields
-        partial text or tool calls from the model in a streaming fashion.
-
-        If a tool call is encountered, we run the tool, add the result to the
-        conversation, then continue streaming by calling the model again.
+        Iterative pipeline:
+         1) Add user query
+         2) Repeatedly call decision LLM
+         3) If it says 'search', run search tool, store results
+         4) If 'answer', yield final LLM response
+         5) If we exceed max_iters, forcibly produce a final
         """
-        # Add the user's message
-        self.conversation.append({"role": "user", "content": user_input})
+        # Add the user query
+        self.conversation.append({"role": "user", "content": user_query})
 
-        while True:
-            # Stream from the model
-            for chunk in self.model.stream_chat(self.conversation, debug=self.debug):
-                if chunk["type"] == "text":
-                    # Regular text chunk: yield to caller
-                    yield chunk["content"]
+        last_top_docs = []
 
-                elif chunk["type"] == "tool_call":
-                    # The model is requesting a tool call
-                    if self.debug:
-                        log(f"Tool call requested: {chunk}", error=False)
-
-                    tool_name = chunk["name"]
-                    args_json = chunk["arguments"]
-                    try:
-                        args = json.loads(args_json) if args_json.strip() else {}
-                    except json.JSONDecodeError:
-                        # If the arguments are invalid JSON, handle gracefully
-                        args = {}
-
-                    # Add the assistant's tool call message
-                    self.conversation.append(
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": chunk["id"],
-                                    "type": "function",
-                                    "function": {
-                                        "name": tool_name,
-                                        "arguments": args_json,
-                                    },
-                                }
-                            ],
-                        }
-                    )
-
-                    # Execute the tool
-                    try:
-                        result = self.tool_registry.run_tool(tool_name, args)
-                    except Exception as e:
-                        # If the tool fails, we add an error response
-                        result = {"error": str(e)}
-
-                    if self.debug:
-                        log(f"Tool execution result: {json.dumps(result, indent=2)}")
-
-                    # Add the tool result to the conversation
-                    self.conversation.append(
-                        {
-                            "role": "tool",
-                            "content": json.dumps(result),
-                            "tool_call_id": chunk[
-                                "id"
-                            ],  # Link the response to the tool call
-                        }
-                    )
-
-                    # Break out of the loop so we can call the model again
-                    # with the updated conversation
-                    break
-
-            else:
-                # If we did not break, then no new tool call was found
-                # and the model is done streaming.
+        for iteration in range(self.max_iters):
+            decision = call_decision_llm(self.conversation, debug=self.debug)
+            if not decision:
+                yield "\n**(No valid decision from LLM - halting.)**\n"
                 return
 
-            # If we reach here, we executed a tool, so let's continue the conversation
-            # by re-calling the model. The loop above repeats until no new calls appear.
+            if decision.scratchpad:
+                # Show scratchpad
+                yield "\n"
+                yield from self._markdown_stream(
+                    f"**Scratchpad iteration={iteration+1}**: {decision.scratchpad}"
+                )
+                yield "\n"
+
+            if decision.action == "answer":
+                if decision.message:
+                    yield "\n"
+                    yield from self._markdown_stream(decision.message)
+                    yield "\n"
+                    self.conversation.append(
+                        {"role": "assistant", "content": decision.message}
+                    )
+                    return
+                else:
+                    yield "\nNo message from the LLM. Stopping.\n"
+                    return
+
+            # If action == "search"
+            if self.debug:
+                log(f"[DEBUG] Searching with queries: {decision.search_queries}")
+
+            yield "\n(Performing web searches...)\n"
+
+            docs = tavily_in_parallel(decision.search_queries)
+            docs = enrich_docs_with_cache(docs)
+            docs = deduplicate_docs(docs)
+            top_docs = cohere_rerank(user_query, docs, top_n=10)
+            last_top_docs = top_docs
+
+            # Store the tool calls in conversation
+            # Convert arguments dict to JSON string for OpenAI API
+            self.conversation.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"search_{iteration}",
+                            "type": "function",
+                            "function": {
+                                "name": "web_search_tool",
+                                "arguments": json.dumps(
+                                    {"queries": decision.search_queries}
+                                ),
+                            },
+                        }
+                    ],
+                }
+            )
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": f"search_{iteration}",
+                    "content": json.dumps(top_docs, indent=2),
+                }
+            )
+
+            # Build enumerated references text
+            enumerated_list = []
+            for i, doc in enumerate(top_docs, start=1):
+                enumerated_list.append(
+                    f"{i}. Title: {doc.get('title','Untitled')}\n"
+                    f"   URL: {doc.get('url','#')}\n"
+                    f"   Snippet:\n   \"{doc.get('content','')}\"\n---\n"
+                )
+            if enumerated_list:
+                # Append references to the single system message
+                reference_block = "\n\n".join(enumerated_list)
+                updated_refs = (
+                    f"\n\nHere are new references (iteration={iteration+1}):\n"
+                    f"{reference_block}"
+                    "#---------------------------------------#\n"
+                )
+                self.system_content += updated_refs
+                # Overwrite system message [0]
+                self.conversation[0] = {
+                    "role": "system",
+                    "content": self.system_content,
+                }
+
+        # Force final if we exit loop
+        yield "\nReached max iterations. Force-producing final answer...\n"
+        self.conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    "Please now provide your final answer with inline citations [1], [2], etc., referencing only the references above, "
+                    "and end with a 'References' section."
+                ),
+            }
+        )
+        forced_decision = call_decision_llm(self.conversation, debug=self.debug)
+        if forced_decision and forced_decision.message:
+            yield from self._markdown_stream(forced_decision.message)
+            yield "\n"
+        else:
+            yield "\nNo final forced answer produced.\n"
+
+    def _markdown_stream(self, md_text: str):
+        md_renderable = Markdown(md_text)
+        with console.capture() as capture:
+            console.print(md_renderable)
+        yield capture.get()
