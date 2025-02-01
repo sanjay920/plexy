@@ -33,7 +33,7 @@
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/plexy.git
+   git clone https://github.com/sanjay920/plexy.git
    cd plexy
    ```
 
