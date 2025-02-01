@@ -23,8 +23,8 @@
 - **Redis and Crawl4AI:** Both services need to be running. You can set these up using Docker.
 - **API Keys:**  
   - [OpenAI](https://openai.com/)  
-  - [Tavily](https://tavily.ai/)  
-  - [Cohere](https://cohere.ai/)  
+  - [Tavily](https://tavily.com/)  
+  - [Cohere](https://cohere.com/)  
 
   You can set these environment variables directly in your shell or use the provided `.env` file.
 
