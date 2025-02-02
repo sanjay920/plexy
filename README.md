@@ -9,7 +9,7 @@
 - **Iterative Decision Pipeline:** Continuously refines responses by alternating between LLM decisions and web search results.
 - **Web Search Integration:** Uses the Tavily API to perform web searches and enrich results with caching (via Redis) and deduplication.
 - **Tool Registry:** Supports built-in and external tools, enabling extensibility for additional capabilities.
-- **LLM Integration:** Integrates with OpenAI’s models to drive decision making.
+- **LLM Integration:** Integrates with OpenAI's models to drive decision making.
 - **Inline Citations:** Answers include inline citations with a final references section based solely on the retrieved sources.
 - **Enhanced Document Quality:** Re-ranks search results using Cohere and enriches content via Crawl4AI when needed.
 
@@ -39,16 +39,16 @@
 
 2. **Install Dependencies:**
 
-   If using [Poetry](https://python-poetry.org/):
-
-   ```bash
-   poetry install
-   ```
-
-   Or, if you prefer using `pip` (make sure to generate a `requirements.txt` if needed):
+   Using pip:
 
    ```bash
    pip install -r requirements.txt
+   ```
+
+   Or if using [Poetry](https://python-poetry.org/):
+
+   ```bash
+   poetry install
    ```
 
 3. **Configure Environment Variables:**
@@ -96,7 +96,7 @@ Plexy relies on both Redis and Crawl4AI being available. You can quickly set the
    docker run -d -p 11235:11235 -e CRAWL4AI_API_TOKEN=your_secret_token unclecode/crawl4ai:basic
    ```
 
-   Verify that it’s accessible at [http://localhost:11235](http://localhost:11235).
+   Verify that it's accessible at [http://localhost:11235](http://localhost:11235).
 
 ---
 
